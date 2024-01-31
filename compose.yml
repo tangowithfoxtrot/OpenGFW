@@ -1,0 +1,18 @@
+version: '3.9'
+services:
+  opengfw:
+    image: opengfw
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      OPENGFW_CONFIG_FILE: /config/config.yaml
+      OPENGFW_LOG_FORMAT: console
+      OPENGFW_LOG_LEVEL: debug
+      OPENGFW_RULE_FILE: /config/rules.yaml
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./rules.yaml:/config/rules.yaml:ro
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW

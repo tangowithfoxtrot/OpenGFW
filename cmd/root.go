@@ -32,6 +32,7 @@ const (
 	appDesc    = "Open source network filtering and analysis software"
 	appAuthors = "Aperture Internet Laboratory <https://github.com/apernet>"
 
+	appConfigEnv    = "OPENGFW_CONFIG_FILE"
 	appLogLevelEnv  = "OPENGFW_LOG_LEVEL"
 	appLogFormatEnv = "OPENGFW_LOG_FORMAT"
 )
@@ -113,7 +114,7 @@ func init() {
 }
 
 func initFlags() {
-	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file")
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", envOrDefaultString(appConfigEnv, "/config/config.yaml"), "config file")
 	rootCmd.PersistentFlags().StringVarP(&logLevel, "log-level", "l", envOrDefaultString(appLogLevelEnv, "info"), "log level")
 	rootCmd.PersistentFlags().StringVarP(&logFormat, "log-format", "f", envOrDefaultString(appLogFormatEnv, "console"), "log format")
 }
