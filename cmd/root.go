@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/apernet/OpenGFW/analyzer"
 	"github.com/apernet/OpenGFW/analyzer/tcp"
@@ -93,6 +93,7 @@ var analyzers = []analyzer.Analyzer{
 	&tcp.TLSAnalyzer{},
 	&tcp.TrojanAnalyzer{},
 	&udp.DNSAnalyzer{},
+	&udp.QUICAnalyzer{},
 	&udp.WireGuardAnalyzer{},
 }
 
@@ -167,8 +168,11 @@ type cliConfig struct {
 }
 
 type cliConfigIO struct {
-	QueueSize uint32 `mapstructure:"queueSize"`
-	Local     bool   `mapstructure:"local"`
+	QueueSize   uint32 `mapstructure:"queueSize"`
+	ReadBuffer  int    `mapstructure:"rcvBuf"`
+	WriteBuffer int    `mapstructure:"sndBuf"`
+	Local       bool   `mapstructure:"local"`
+	RST         bool   `mapstructure:"rst"`
 }
 
 type cliConfigWorkers struct {
@@ -191,8 +195,11 @@ func (c *cliConfig) fillLogger(config *engine.Config) error {
 
 func (c *cliConfig) fillIO(config *engine.Config) error {
 	nfio, err := io.NewNFQueuePacketIO(io.NFQueuePacketIOConfig{
-		QueueSize: c.IO.QueueSize,
-		Local:     c.IO.Local,
+		QueueSize:   c.IO.QueueSize,
+		ReadBuffer:  c.IO.ReadBuffer,
+		WriteBuffer: c.IO.WriteBuffer,
+		Local:       c.IO.Local,
+		RST:         c.IO.RST,
 	})
 	if err != nil {
 		return configError{Field: "io", Err: err}
@@ -253,6 +260,7 @@ func runMain(cmd *cobra.Command, args []string) {
 		logger.Fatal("failed to load rules", zap.Error(err))
 	}
 	rsConfig := &ruleset.BuiltinConfig{
+		Logger:          &rulesetLogger{},
 		GeoSiteFilename: config.Ruleset.GeoSite,
 		GeoIpFilename:   config.Ruleset.GeoIp,
 	}
@@ -268,14 +276,42 @@ func runMain(cmd *cobra.Command, args []string) {
 		logger.Fatal("failed to initialize engine", zap.Error(err))
 	}
 
+	// Signal handling
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	go func() {
-		sigChan := make(chan os.Signal)
-		signal.Notify(sigChan, os.Interrupt, os.Kill)
-		<-sigChan
+		// Graceful shutdown
+		shutdownChan := make(chan os.Signal, 1)
+		signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
+		<-shutdownChan
 		logger.Info("shutting down gracefully...")
 		cancelFunc()
 	}()
+	go func() {
+		// Rule reload
+		reloadChan := make(chan os.Signal, 1)
+		signal.Notify(reloadChan, syscall.SIGHUP)
+		for {
+			<-reloadChan
+			logger.Info("reloading rules")
+			rawRs, err := ruleset.ExprRulesFromYAML(args[0])
+			if err != nil {
+				logger.Error("failed to load rules, using old rules", zap.Error(err))
+				continue
+			}
+			rs, err := ruleset.CompileExprRules(rawRs, analyzers, modifiers, rsConfig)
+			if err != nil {
+				logger.Error("failed to compile rules, using old rules", zap.Error(err))
+				continue
+			}
+			err = en.UpdateRuleset(rs)
+			if err != nil {
+				logger.Error("failed to update ruleset", zap.Error(err))
+			} else {
+				logger.Info("rules reloaded")
+			}
+		}
+	}()
+
 	logger.Info("engine started")
 	logger.Info("engine exited", zap.Error(en.Run(ctx)))
 }
@@ -342,14 +378,6 @@ func (l *engineLogger) UDPStreamAction(info ruleset.StreamInfo, action ruleset.A
 		zap.Bool("noMatch", noMatch))
 }
 
-func (l *engineLogger) MatchError(info ruleset.StreamInfo, err error) {
-	logger.Error("match error",
-		zap.Int64("id", info.ID),
-		zap.String("src", info.SrcString()),
-		zap.String("dst", info.DstString()),
-		zap.Error(err))
-}
-
 func (l *engineLogger) ModifyError(info ruleset.StreamInfo, err error) {
 	logger.Error("modify error",
 		zap.Int64("id", info.ID),
@@ -379,17 +407,29 @@ func (l *engineLogger) AnalyzerErrorf(streamID int64, name string, format string
 		zap.String("msg", fmt.Sprintf(format, args...)))
 }
 
+type rulesetLogger struct{}
+
+func (l *rulesetLogger) Log(info ruleset.StreamInfo, name string) {
+	logger.Info("ruleset log",
+		zap.String("name", name),
+		zap.Int64("id", info.ID),
+		zap.String("src", info.SrcString()),
+		zap.String("dst", info.DstString()),
+		zap.Any("props", info.Props))
+}
+
+func (l *rulesetLogger) MatchError(info ruleset.StreamInfo, name string, err error) {
+	logger.Error("ruleset match error",
+		zap.String("name", name),
+		zap.Int64("id", info.ID),
+		zap.String("src", info.SrcString()),
+		zap.String("dst", info.DstString()),
+		zap.Error(err))
+}
+
 func envOrDefaultString(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return def
-}
-
-func envOrDefaultBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		b, _ := strconv.ParseBool(v)
-		return b
 	}
 	return def
 }
